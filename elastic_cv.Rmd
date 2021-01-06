@@ -1,0 +1,176 @@
+---
+title: "Penalized Logistic Regression"
+author: "Nick Wornson"
+date: "1/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE,message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pROC)
+library(MASS)
+library(glmnet)
+library(caret)
+source('utilities.r')
+```
+
+
+# Load the data
+
+Data is scaled and imputed in preprocessing.ipynb.  Test data is than scaled using the same scale and imputation values as the training data.  load_data() and train_val_split() are custom functions located in 'utilities.r'
+```{r}
+data = load_data()
+split = train_val_split(data$data,.7)
+train = split$train
+val = split$val
+
+h1_col = which(colnames(train) == 'h1n1_vaccine')
+seas_col = which(colnames(train) == 'seasonal_vaccine')
+
+h1_train = train[,-seas_col]
+h1_val = val[,-seas_col]
+
+s_train = train[,-h1_col]
+s_val = val[,-h1_col]
+
+```
+
+
+# Data preprocessing.  
+
+glmnet requires us to create the design matrix for input
+```{r}
+# model matrices required for glmnet
+MMH = model.matrix(h1n1_vaccine ~ .,h1_train)[,-1] # remove the intercept
+MMS = model.matrix(seasonal_vaccine ~ .,s_train)[,-1]
+
+MMHV = model.matrix(h1n1_vaccine ~ .,h1_val)[,-1]
+MMSV = model.matrix(seasonal_vaccine ~ .,s_val)[,-1]
+
+```
+
+# Try out a lasso regression model
+
+We can start with a lasso regression, and perform cross-validation to get an optimal lambda value.  
+
+```{r}
+# find the best alpha using lasso regression
+
+cv.lasso.h = cv.glmnet(MMH,h1_train$h1n1_vaccine,
+                     alpha = 1,
+                     family = 'binomial')
+
+cv.lasso.h$lambda.min
+plot(cv.lasso.h)
+```
+
+Lets fit the model using the optimal lambda value and look at the AUC score on the validation set
+```{r message=FALSE}
+opto.model.h = glmnet(MMH,h1_train$h1n1_vaccine,
+                    alpha = 1, 
+                    family = "binomial",
+                    lambda = cv.lasso.h$lambda.min)
+
+cv.lasso.probs.h = opto.model.h %>% 
+  predict(newx = MMHV,type = 'response')
+score=auc(as.numeric(h1_val$h1n1_vaccine),as.numeric(cv.lasso.probs.h))
+```
+
+
+Now lets create a loop to go through each combination of lasso, ridge, and elasticnet for each response variable, find the optimal lambda value for each, and report the auc on the validation set.  I have created a function to perform the cv, fit the model, and return the AUC score located in the utilities.r file.  
+
+
+```{r message=FALSE}
+
+results = data.frame(response = character(),
+                     score = numeric(),
+                     alpha = numeric(),
+                     lambda = numeric())
+
+alphas = c(0,.2,.4,.5,.6,.7,.8,1)
+for(i in 1:length(alphas)){
+  
+  h1_score = cv.lasso.best(MMH,h1_train$h1n1_vaccine,MMHV,
+                           h1_val$h1n1_vaccine,alphas[i])
+  
+  h1_out = data.frame(response = 'h1n1',
+                      score = h1_score$score,
+                      alpha = alphas[i],
+                      lambda = h1_score$lambda)
+  
+  s_score = cv.lasso.best(MMS,s_train$seasonal_vaccine,
+                          MMSV,s_val$seasonal_vaccine,alphas[i])
+  
+  s_out = data.frame(response = 'seasonal',
+                      score = s_score$score,
+                      alpha = alphas[i],
+                      lambda = s_score$lambda)
+  
+  results = rbind(results,h1_out,s_out)
+  
+  
+
+  
+}
+
+```
+
+
+```{r pressure, echo=FALSE}
+results$score = as.numeric(results$score)
+results
+```
+Not much distinction between the models.. 
+
+# Fit our optimal models
+```{r}
+best = results %>% group_by(response) %>%
+    filter(score == max(score))
+best
+```
+# Make a submission
+```{r}
+alpha.h = best[1,3]
+lambda.h = best[1,4]
+alpha.s = best[2,3]
+lambda.s = best[2,4]
+
+MMH_full = model.matrix(h1n1_vaccine ~ .,data$data[,-seas_col])[,-1] 
+MMS_full = model.matrix(seasonal_vaccine ~ .,data$data[,-h1_col])[,-1]
+
+MMtest = model.matrix( ~ .,data$test)[,-1]
+
+opto.model.h = glmnet(MMH_full,data$data$h1n1_vaccine,
+                    alpha = alpha.h, 
+                    family = "binomial",
+                    lambda = lambda.h)
+
+opto.model.s = glmnet(MMS_full,data$data$seasonal_vaccine,
+                    alpha = alpha.s, 
+                    family = "binomial",
+                    lambda = lambda.s)
+
+cv.elastic.probs.h = opto.model.h %>% 
+    predict(newx = MMtest,type = 'response')
+
+cv.elastic.probs.s = opto.model.s %>% 
+    predict(newx = MMtest,type = 'response')
+
+submit = data.frame(respondent_id = data$test_id,
+                    h1n1_vaccine = cv.elastic.probs.h,
+                    seasonal_vaccine = cv.elastic.probs.s)
+colnames(submit) = c('respondent_id','h1n1_vaccine','seasonal_vaccine')
+
+write.csv(submit,'elastic_cv.csv',row.names = FALSE)
+
+# scored .8350
+
+```
+
+
+```{r}
+head(submit)
+```
+
+
