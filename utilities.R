@@ -71,4 +71,52 @@ bplot_fill = function(data,x,y,fill,xlab = x,ylab=y,...){
   
 }
 
+####################################################
+# Cross-validation for boosting parameter estimation
+#
+#
+#
+#
+#
+#
+#
+
+cv_boost = function(X,y,md,R,lambda,col_samp,sub_samp,mcw,K){
+  
+  n = nrow(X)
+  
+  ind = sample(n)
+  
+  results = numeric(K)
+  
+  for(k in 1:K){
+    
+    leave.out = ind[(1 + floor((k-1)*n/K)):floor(k*n/K)]
+    
+    X.train = X[-leave.out,]
+    y.train = y[-leave.out]
+    
+    X.val = X[leave.out,]
+    y.val = y[leave.out]
+    
+    model = xgboost(X.train,y.train,
+                    max.depth = md, 
+                    eta = 1, nthread = 2, 
+                    nrounds = R, 
+                    #objective = "binary:logistic",
+                    eval_metric = 'auc',
+                    verbose = FALSE,
+                    lambda = lambda,
+                    colsample_bytree = col_samp,
+                    subsample = sub_samp,
+                    min_child_weight = mcw)
+    
+    preds = predict(model,as.matrix(X.val))
+    results[k] = auc(as.numeric(y.val),as.numeric(preds))
+  }
+  
+  return(mean(results))
+}
+testing = cv_boost(MMT,label.train.h,1,200,0,.1,.25,.25,4)
+
 

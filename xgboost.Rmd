@@ -1,0 +1,230 @@
+---
+title: "eXtreme Gradient Boosting (XGBoost)"
+author: "Nick Wornson"
+date: \today
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(xgboost)
+library(pROC)
+source('utilities.r')
+```
+
+source: https://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
+
+
+```{r}
+data = load_data()
+split = train_val_split(data$data,.7)
+train = split$train
+val = split$val
+test = data$test
+
+h1_col = which(colnames(train) == 'h1n1_vaccine')
+seas_col = which(colnames(train) == 'seasonal_vaccine')
+
+train_data = train[,-c(h1_col,seas_col)]
+val_data = val[,-c(h1_col,seas_col)]
+  
+label.train.s = train[,seas_col]
+label.train.h = train[,h1_col]
+label.val.s = val[,seas_col]
+label.val.h = val[,h1_col]
+
+```
+
+# Preprocessing
+
+```{r}
+# model matrices required for glmnet
+MMT = model.matrix(~ .,train_data)[,-1] # remove the intercept
+MMV = model.matrix(~ .,val_data)[,-1]
+
+
+```
+
+# Train a model, track the accuracy
+```{r}
+model = xgboost(MMT,label.train.h,
+                 max.depth = 1, 
+                eta = 1, nthread = 2, 
+                nrounds = 300, 
+                #objective = "binary:logistic",
+                eval_metric = 'auc',
+                verbose = FALSE)
+
+preds = predict(model,MMV)
+auc(as.numeric(label.val.h),as.numeric(preds))
+plot(model$evaluation_log)
+```
+
+```{r}
+model = xgboost(MMT,label.train.s,
+                 max.depth = 1, 
+                eta = 1, nthread = 2, 
+                nrounds = 200, 
+                #objective = "binary:logistic",
+                eval_metric = 'auc',
+                verbose = FALSE,
+                lambda = 0,
+                colsample_bytree = .5,
+                subsample = .5,
+                min_child_weight = .75)
+
+preds = predict(model,MMV)
+invisible(auc(as.numeric(label.val.s),as.numeric(preds)))
+plot(model$evaluation_log)
+tail(model$evaluation_log,10)
+```
+
+```{r warning=FALSE}
+preds = predict(model,MMV)
+auc(as.numeric(label.val.s),as.numeric(preds))
+```
+# Estimating parameters
+```{r eval=FALSE}
+MD = c(1,2,3)
+N = c(300,500,700,1000)
+Lambda = c(0,1)
+Col_samp = c(.1,.25,.5,.75,1)
+Sub_samp = c(.1,.25,.5,.75,1)
+Mcw = c(.1,.25,.5,.75,1)
+K = 5
+results = data.frame(response = character(),
+                     MD = numeric(),
+                     N = numeric(),
+                     lambda = numeric(),
+                     Col_samp = numeric(),
+                     Sub_samp = numeric(),
+                     Mcw = numeric(),
+                     Score = numeric())
+idx = 1
+
+total = length(MD)*length(N)*length(Lambda)*
+  length(Col_samp)*length(Sub_samp)*length(Mcw)
+
+for(i in 1:length(MD)){
+  for(j in 1:length(N)){
+    for(l in 1:length(Lambda)){
+      for(c in 1:length(Col_samp)){
+        for(s in 1:length(Sub_samp)){
+          for(m in 1:length(Mcw)){
+            
+            cat('round ',(idx+1)/2,'\n')
+            cat(((idx+1)/2)/total,'% done','\n')
+            
+            score = cv_boost(MMT,label.train.h,
+                             MD[i],N[j],Lambda[l],
+                             Col_samp[c],Sub_samp[s],Mcw[m],K)
+            
+            results[idx,] = c('h1n1',i,j,l,c,s,m,score)
+            idx = idx + 1 
+            
+            cat("h1n1: ",score,'\n')
+            
+            score = cv_boost(MMT,label.train.s,
+                             MD[i],N[j],Lambda[l],
+                             Col_samp[c],Sub_samp[s],Mcw[m],K)
+            
+            results[idx,] = c('seasonal',i,j,l,c,s,m,score)
+            idx = idx + 1 
+            
+            cat("seasonal: ",score,'\n')
+          }
+        }
+      }
+      
+    }
+  }
+}
+
+write.csv(results,'cv_boost_results.csv',row.names = FALSE)
+
+
+```
+
+Note: this was executed previously to rendering the Markdown document.  Also parameters were saved as indexes, not values.  
+```{r}
+boost_results = read.csv('cv_boost_results.csv')
+
+seas_params = boost_results %>% filter( response == 'seasonal' & Score == max(Score))
+h1n1_params = boost_results %>% filter( response == 'h1n1') %>%
+  filter(Score == max(Score))
+
+rbind(seas_params,h1n1_params)
+
+
+```
+```{r}
+
+model = xgboost(MMT,label.train.s,
+                 max.depth = 1, 
+                eta = 1, nthread = 2, 
+                nrounds = 300, 
+                #objective = "binary:logistic",
+                eval_metric = 'auc',
+                verbose = FALSE,
+                lambda = 0,
+                colsample_bytree = .25,
+                subsample = .5,
+                min_child_weight = .25)
+
+preds = predict(model,MMV)
+auc(as.numeric(label.val.s),as.numeric(preds))
+
+```
+
+
+
+# Submission
+```{r}
+
+MMH_full = model.matrix(h1n1_vaccine ~ .,data$data[,-seas_col])[,-1] 
+MMS_full = model.matrix(seasonal_vaccine ~ .,data$data[,-h1_col])[,-1]
+
+MMtest = model.matrix( ~ .,data$test)[,-1]
+
+label.full.s = data$data[,seas_col]
+label.full.h = data$data[,h1_col]
+
+model.s = xgboost(MMH_full,label.full.s,
+                 max.depth = 1, 
+                eta = 1, nthread = 2, 
+                nrounds = 300, 
+                #objective = "binary:logistic",
+                eval_metric = 'auc',
+                verbose = FALSE,
+                lambda = 1,
+                colsample_bytree = .5,
+                subsample = 1,
+                min_child_weight = .25)
+
+preds.s = predict(model.s,MMtest)
+
+
+model.h = xgboost(MMH_full,label.full.h,
+                 max.depth = 1, 
+                eta = 1, nthread = 2, 
+                nrounds = 700, 
+                #objective = "binary:logistic",
+                eval_metric = 'auc',
+                verbose = FALSE,
+                lambda = 0,
+                colsample_bytree = .25,
+                subsample = .75,
+                min_child_weight = .5)
+
+preds.h = predict(model.h,MMtest)
+
+submit = data.frame(respondent_id = data$test_id,
+                    h1n1_vaccine = preds.h,
+                    seasonal_vaccine = preds.s)
+colnames(submit) = c('respondent_id','h1n1_vaccine','seasonal_vaccine')
+
+write.csv(submit,'gridsearch_XGB.csv',row.names = FALSE)
+
+```
+
